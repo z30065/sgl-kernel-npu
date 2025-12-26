@@ -225,7 +225,7 @@ jobs:
         test_config:
           - name: test_internode_a2
             node_size: 2
-            test_case: test/python/deepep/test_internode_a2.py
+            test_case: tests/python/deepep/test_internode_a2.py
     uses: ./.github/workflows/internode.yml
     with:
       soc_version: a2
