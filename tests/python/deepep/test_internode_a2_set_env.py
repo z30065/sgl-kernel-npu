@@ -48,7 +48,7 @@ def set_environment():
     print(f"set environment start ......")
     node_ip = os.getenv("POD_IP")
     hostname = os.getenv("HOSTNAME")
-    pod_index = int(hostname.rsplit("-", 1)[-1])
+    pod_index = hostname.rsplit("-", 1)[-1]
     os.environ["RANK"] = pod_index
 
     # monitor configmap to generate dist-init-addr and node-rank
