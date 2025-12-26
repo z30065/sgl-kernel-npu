@@ -215,6 +215,26 @@ jobs:
           HCCL_BUFFSIZE: 2048
         run: bash scripts/generalization_test_fused_deep_moe.sh
 
+  test-build-deepep-internode:
+    name: multi-node
+    if: ${{ (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') }}
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        test_config:
+          - name: test_internode_a2
+            node_size: 2
+            test_case: test/python/deepep/test_internode_a2.py
+    uses: ./.github/workflows/internode.yml
+    with:
+      soc_version: a2
+      runner: linux-amd64-cpu-0
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/dockerhub/lmsysorg/sglang:cann8.3.rc2-910b-release1225'
+      test_config_name: ${{ matrix.test_config.name }}
+      node_size: ${{ matrix.test_config.node_size }}
+      test_case: ${{ matrix.test_config.test_case }}
+
   finish:
     if: always()
     needs:
