@@ -260,11 +260,25 @@ def test(
 def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
     shared_expert_rank_num = int(os.getenv("MOE_SHARED_EXPERT_RANK_NUM", 0))
-    num_tokens, hidden = args.num_tokens, args.hidden
+    base_num_tokens, hidden = args.num_tokens, args.hidden
     num_topk, num_experts = args.num_topk, args.num_experts
     use_experts = num_experts if shared_expert_rank_num == 0 else (num_experts - 1)
     use_ranks = num_ranks - shared_expert_rank_num
     drop_percent = args.drop_percent
+
+    fluctuation_percentage = 0.1
+    min_fluctuation = 2
+
+    if base_num_tokens < 10:
+        fluctuation = random.randint(-min_fluctuation, min_fluctuation)
+        num_tokens = base_num_tokens + fluctuation
+    else:
+        fluctuation = random.uniform(1 - fluctuation_percentage, 1 + fluctuation_percentage)
+        num_tokens = int(base_num_tokens * fluctuation)
+
+    # Ensure num_tokens is at least 1
+    num_tokens = max(num_tokens, 1)
+
     num_rdma_bytes = Buffer.get_low_latency_rdma_size_hint(
         num_tokens, hidden, num_ranks, num_experts
     )

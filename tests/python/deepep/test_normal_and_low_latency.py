@@ -103,7 +103,20 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     )
 
     for i in range(args.test_loop):
-        normal_num_tokens = args.normal_num_tokens
+        base_normal_num_tokens = args.normal_num_tokens
+        fluctuation_percentage = 0.1
+        min_fluctuation = 2
+
+        if base_normal_num_tokens < 10:
+            fluctuation = random.randint(-min_fluctuation, min_fluctuation)
+            normal_num_tokens = base_normal_num_tokens + fluctuation
+        else:
+            fluctuation = random.uniform(1 - fluctuation_percentage, 1 + fluctuation_percentage)
+            normal_num_tokens = int(base_normal_num_tokens * fluctuation)
+
+        # Ensure normal_num_tokens is at least 1
+        normal_num_tokens = max(normal_num_tokens, 1)
+
         if local_rank == 0:
             print(f"Start executing normal test loop {i} ...", flush=True)
         normal_test(
@@ -116,7 +129,20 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
         if local_rank == 0:
             print(f"End executing normal test loop {i} ...", flush=True)
 
-        low_latency_num_tokens = args.low_latency_num_tokens
+        base_low_latency_num_tokens = args.low_latency_num_tokens
+        fluctuation_percentage = 0.1
+        min_fluctuation = 2
+
+        if base_low_latency_num_tokens < 10:
+            fluctuation = random.randint(-min_fluctuation, min_fluctuation)
+            low_latency_num_tokens = base_low_latency_num_tokens + fluctuation
+        else:
+            fluctuation = random.uniform(1 - fluctuation_percentage, 1 + fluctuation_percentage)
+            low_latency_num_tokens = int(base_low_latency_num_tokens * fluctuation)
+
+        # Ensure low_latency_num_tokens is at least 1
+        low_latency_num_tokens = max(low_latency_num_tokens, 1)
+
         if local_rank == 0:
             print(f"Start executing low latency test loop {i} ...", flush=True)
         low_latency_test(
