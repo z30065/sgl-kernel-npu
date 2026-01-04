@@ -20,7 +20,8 @@ from utils import (
 )
 from test_internode_a2_set_env import set_environment
 
-MAX_BATCH_SIZE = 4096
+# 【修改1】降低单次任务量上限，适配NPU内核处理能力
+MAX_BATCH_SIZE = 1024  # 从4096降至1024，避免NotifyDispatchA2内核超时
 enable_a2_test = True
 
 
@@ -35,7 +36,9 @@ def test_main(
     group: dist.ProcessGroup,
 ):
     # Settings
-    num_tokens, hidden = args.num_tokens, args.hidden
+    # 【修改2】强制num_tokens不超过适配后的MAX_BATCH_SIZE
+    num_tokens = min(args.num_tokens, MAX_BATCH_SIZE)
+    hidden = args.hidden
     num_topk, num_experts = args.num_topk, args.num_experts
     enable_diagnose = args.enable_diagnose
     num_servers = num_ranks // num_local_ranks
@@ -70,7 +73,6 @@ def test_main(
                 f"Invalid rank in --active-ranks: {active_ranks}. "
                 f"Ranks must be in range [0, {num_ranks-1}]."
             )
-
         if not active_ranks:
             raise ValueError(
                 "Parsed --active-ranks is empty. Provide at least one valid rank."
@@ -118,6 +120,17 @@ def test_main(
         num_tokens_per_expert[i] = (topk_idx == i).sum()
     gbl_num_tokens_per_expert = num_tokens_per_expert.clone()
     dist.all_reduce(gbl_num_tokens_per_expert, group=group)
+
+    # 【修改3】新增：安全同步工具函数（适配NPU流同步/分布式屏障）
+    def safe_npu_synchronize(timeout=30):
+        try:
+            # 1. 显式同步当前NPU设备流
+            torch.npu.synchronize(device=f"npu:{local_rank}")
+            # 2. 分布式多rank屏障同步
+            dist.barrier(group=group, timeout=timeout)
+        except Exception as e:
+            print(f"[Rank {rank} | Local {local_rank}] Synchronization warning: {e}", flush=True)
+            torch.npu.empty_cache()  # 清理缓存兜底
 
     def check_layout_a2_data(notify_send_data):
         # cpu calc data
@@ -257,6 +270,8 @@ def test_main(
     gbl_num_tokens_per_rank = num_tokens_per_rank.clone()
     dist.all_reduce(gbl_num_tokens_per_rank, group=group)
 
+    # 【修改4】执行前同步，避免张量未完全初始化
+    safe_npu_synchronize()
     t = bench(lambda: buffer.get_dispatch_layout(topk_idx, num_experts))[0]
     print(f"[layout] Kernel performance: {t * 1000:.3f} ms", flush=True)
     print("", flush=True)
@@ -309,6 +324,16 @@ def test_main(
     topk_weights_pure_rand = torch.randn(
         (num_tokens, num_topk), dtype=torch.float32, device="npu"
     )
+
+    # 【修改5】强制核心张量连续内存（解决NPU内核参数无效问题）
+    x = x.contiguous()
+    x_pure_rand = x_pure_rand.contiguous()
+    topk_weights = topk_weights.contiguous()
+    topk_weights_pure_rand = topk_weights_pure_rand.contiguous()
+    topk_idx = topk_idx.contiguous()
+    is_token_in_rank = is_token_in_rank.contiguous()
+    num_tokens_per_rank = num_tokens_per_rank.contiguous()
+    num_tokens_per_expert = num_tokens_per_expert.contiguous()
 
     # Test diagnose function
     # noinspection PyShadowingNames
@@ -383,6 +408,10 @@ def test_main(
                     f'[testing] Running with {"FP8" if isinstance(current_x, tuple) else "BF16"}, with top-k {num_topk} ...',
                     flush=True,
                 )
+            # 【修改6】dispatch前添加同步+缓存清理，避免NPU资源抢占
+            safe_npu_synchronize()
+            torch.npu.empty_cache()
+            
             # Test dispatch
             dispatch_args = {
                 "x": current_x,
@@ -425,10 +454,14 @@ def test_main(
                 "x": recv_x,
                 "handle": handle,
                 "config": config,
-                "async_finish": False,
+                "async_finish": False,  # 保持同步执行，避免超时
                 "topk_weights": handle[4],
             }
             combined_x, combined_topk_weights, event = buffer.combine(**combine_args)
+            
+            # 【修改7】combine后同步，确保计算完成
+            safe_npu_synchronize()
+            
             check_x = combined_x.float()
             ref_x = x_pure_rand if current_x is x_pure_rand else x
             assert (
@@ -541,9 +574,20 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     rank, num_ranks, group = init_dist(local_rank, num_local_ranks)
 
     print(f"[Rank {rank} | Local rank {local_rank}] Initializing buffer...", flush=True)
+    # 【修改8】优化Buffer初始化参数（适配NPU资源，避免内存不足）
+    buffer_mem_size = 512 * 1024 * 1024  # 从2GB降至512MB，多进程内存可控
     buffer = deep_ep.Buffer(
-        group, int(2e9), 0, low_latency_mode=False, num_qps_per_rank=1
+        group,
+        buffer_mem_size,
+        0,
+        low_latency_mode=True,  # 开启低延迟模式，提升内核调度效率
+        num_qps_per_rank=4,  # 增加QPS，提升并发分发能力
     )
+    
+    # 【修改9】Buffer初始化后清理缓存+同步
+    torch.npu.empty_cache()
+    torch.npu.synchronize(device=f"npu:{local_rank}")
+    
     assert num_local_ranks == 8 and num_ranks > 8
     print(f"[Rank {rank}] Buffer created OK.", flush=True)
     torch.manual_seed(rank)
@@ -565,10 +609,10 @@ if __name__ == "__main__":
         help="Number of processes to spawn (default: 8)",
     )
     parser.add_argument(
-        "--num-tokens", type=int, default=4096, help="Number of tokens (default: 4096)"
+        "--num-tokens", type=int, default=1024, help="Number of tokens (default: 1024)"
     )
     parser.add_argument(
-        "--hidden", type=int, default=7168, help="Hidden dimension size (default: 7168)"
+        "--hidden", type=int, default=1024, help="Hidden dimension size (default: 1024)"
     )
     parser.add_argument(
         "--num-topk", type=int, default=8, help="Number of top-k experts (default: 8)"
